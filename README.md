@@ -77,3 +77,7 @@ Use **either** cron (`crontab -e`):
 
 **or** start `releaseclone.py watch` from your session autostart, or as a user service.
 `watch` re-reads the config before each check, so edits apply without a restart.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
