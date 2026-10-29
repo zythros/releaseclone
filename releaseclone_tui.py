@@ -12,7 +12,9 @@ import curses
 import glob
 import json
 import queue
+import random
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -151,6 +153,54 @@ class ConfigFile:
         tmp.replace(self.path)
 
 
+# --------------------------------------------------------------------------- cron
+
+CRON_TAG = "# releaseclone"  # marks the one crontab line we own
+CRON_HOURS = (1, 2, 3, 4, 6, 8, 12, 24)  # intervals cron can space evenly through a day
+
+
+class Crontab:
+    """Reads and edits the user's crontab, touching only the line tagged CRON_TAG."""
+
+    @staticmethod
+    def available() -> bool:
+        return shutil.which("crontab") is not None
+
+    @staticmethod
+    def lines() -> list[str]:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout.splitlines()
+        if "no crontab" in r.stderr.lower():
+            return []
+        # Anything else (permissions, cron missing): never risk overwriting the crontab blind.
+        raise RuntimeError(f"can't read crontab: {r.stderr.strip() or r.returncode}")
+
+    @classmethod
+    def ours(cls) -> str | None:
+        return next((l for l in cls.lines() if l.rstrip().endswith(CRON_TAG)), None)
+
+    @classmethod
+    def set(cls, hours: int | None, command: str) -> None:
+        """Install/update our line to run every `hours` hours; None removes it."""
+        if not cls.available():
+            raise RuntimeError("the crontab command isn't installed")
+        lines = cls.lines()
+        old = next((l for l in lines if l.rstrip().endswith(CRON_TAG)), None)
+        lines = [l for l in lines if l is not old]
+        if hours:
+            # Keep the existing minute; otherwise pick one at random so we don't all hit :00.
+            minute = old.split()[0] if old and old.split()[0].isdigit() else str(random.randint(1, 59))
+            hour_field = "*" if hours == 1 else ("0" if hours == 24 else f"*/{hours}")
+            lines.append(f"{minute} {hour_field} * * * {command} {CRON_TAG}")
+        if lines == cls.lines():
+            return
+        r = subprocess.run(["crontab", "-"], input="".join(l + "\n" for l in lines),
+                           capture_output=True, text=True)
+        if r.returncode:
+            raise RuntimeError(f"crontab refused the update: {r.stderr.strip()}")
+
+
 # --------------------------------------------------------------------------- helpers
 
 
@@ -202,13 +252,17 @@ class Field:
     label: str
     key: str
     value: object
-    kind: str  # text | list | int | tri | interval
+    kind: str  # text | list | int | tri | bool | hours
     help: str = ""
 
     def show(self) -> str:
         v = self.value
         if self.kind == "tri":
             return {None: "(default)", True: "yes", False: "no"}[v]
+        if self.kind == "bool":
+            return "on" if v else "off"
+        if self.kind == "hours" and v:
+            return f"{v} hour{'s' if v != 1 else ''}"
         if v is None or v == "":
             return "(default)"
         if self.kind == "list":
@@ -771,8 +825,12 @@ class App:
             return
         fields = [
             Field("Download folder", "dest", raw.get("dest"), "text", "Where files go (default ~/Downloads/releases)"),
-            Field("Check interval", "interval", raw.get("interval"), "interval",
-                  "How often to check, e.g. 30m, 6h, 1d (default 6h)"),
+            Field("Check every", "interval", self.interval_hours(raw.get("interval")), "hours",
+                  f"Hours between checks: {', '.join(map(str, CRON_HOURS))}. "
+                  "Used by the TUI, `watch` and cron"),
+            Field("Background checks", "cron", self.cron_enabled(), "bool",
+                  "Check via cron even when the TUI is closed" if Crontab.available()
+                  else "Unavailable: the crontab command isn't installed"),
             Field("Keep releases", "keep", raw.get("keep"), "int",
                   "Releases to keep per repo before pruning (0 or empty = keep all). Repos can override."),
             Field("Notifications", "notify", raw.get("notify"), "tri", "Desktop notification for new releases"),
@@ -780,18 +838,50 @@ class App:
             Field("Post command", "post_command", raw.get("post_command"), "text",
                   "Shell command run after each new release ($RC_REPO, $RC_TAG, $RC_DIR)"),
         ]
+        old_cron = fields[2].value
         vals = self.form("Settings", fields)
         if vals is None:
             return
+        hours, cron = vals.pop("interval"), vals.pop("cron")
+        vals["interval"] = f"{hours}h"
         try:
-            for f in fields:
-                if raw.get(f.key) != vals[f.key]:
-                    self.cfgfile.set_top(f.key, vals[f.key])
+            for key, value in vals.items():
+                if raw.get(key) != value:
+                    self.cfgfile.set_top(key, value)
         except Exception as e:
             self.flash(f"couldn't save config: {e}")
             return
         self.reload_config(force=True)
-        self.flash("settings saved")
+        msg = "settings saved"
+        if cron or old_cron:
+            try:
+                Crontab.set(hours if cron else None, self.cron_command())
+                msg += f"; cron checks every {hours}h" if cron else "; cron checks removed"
+            except Exception as e:
+                msg = f"settings saved, but cron wasn't updated: {e}"
+        self.flash(msg)
+
+    @staticmethod
+    def interval_hours(interval) -> int:
+        """Config interval -> the nearest allowed whole-hour value."""
+        try:
+            secs = core.parse_interval(interval or "6h")
+        except ValueError:
+            secs = 6 * 3600
+        return min(CRON_HOURS, key=lambda h: abs(h * 3600 - secs))
+
+    def cron_enabled(self) -> bool:
+        try:
+            return Crontab.available() and Crontab.ours() is not None
+        except RuntimeError:
+            return False
+
+    def cron_command(self) -> str:
+        exe = shutil.which("releaseclone") or str(Path(core.__file__).resolve())
+        cmd = [exe, "--config", str(self.args.config.resolve()), "--state", str(self.args.state.resolve()), "run"]
+        log = self.args.state.resolve().parent / "log"
+        line = f"{shlex.join(cmd)} >> {shlex.quote(str(log))} 2>&1"
+        return line.replace("%", "\\%")  # cron turns a bare % into a newline
 
     # ---- generic form
 
@@ -826,6 +916,9 @@ class App:
         if f.kind == "tri":
             f.value = {None: True, True: False, False: None}[f.value]
             return
+        if f.kind == "bool":
+            f.value = not f.value
+            return
         cur = ", ".join(f.value) if f.kind == "list" and f.value else ("" if f.value is None else str(f.value))
         s = self.prompt(f.label, cur)
         if s is None:
@@ -838,14 +931,11 @@ class App:
                 self.flash("must be a whole number")
                 return
             f.value = int(s) if s else None
-        elif f.kind == "interval":
-            if s:
-                try:
-                    core.parse_interval(s)
-                except ValueError as e:
-                    self.flash(str(e))
-                    return
-            f.value = s or None
+        elif f.kind == "hours":
+            if not s.isdigit() or int(s) not in CRON_HOURS:
+                self.flash(f"hours must be one of {', '.join(map(str, CRON_HOURS))} (they divide the day evenly)")
+                return
+            f.value = int(s)
         else:
             f.value = s or None
 

@@ -55,7 +55,7 @@ If you have no config yet, it creates one. (Running from a checkout, `releaseclo
 | `e` | edit a repo (patterns, keep, prereleases, destination, …) |
 | `⏎` | downloaded releases: `d` delete, `g` download again, `o` open folder |
 | `r` / `R` | check selected / all repos now |
-| `s` | global settings (folder, interval, keep, notifications) |
+| `s` | global settings (folder, check hours, background cron checks, keep, notifications) |
 | `o` | open the repo's download folder |
 | `d` | remove a repo (optionally with its files) |
 | `l` / `L` | toggle the log pane / full-screen log |
@@ -92,14 +92,20 @@ State is kept in `~/.local/share/releaseclone/state.json`.
 
 ## Running periodically
 
-Use **either** cron (`crontab -e`):
+The easiest way: in `releaseclone tui`, press `s` and turn on **Background checks**. This adds a
+cron entry that runs every **Check every** hours (1, 2, 3, 4, 6, 8, 12 or 24). It updates the
+entry when you change the hours and removes it when you turn the setting off. The entry is
+tagged `# releaseclone`, and nothing else in your crontab is touched. Cron's daemon (e.g.
+`cronie`) must be running.
 
-```
-0 */6 * * * ~/.local/bin/releaseclone run >> ~/.local/share/releaseclone/log 2>&1
-```
+Alternatively:
 
-**or** start `releaseclone watch` from your session autostart, or as a user service.
-`watch` re-reads the config before each check, so edits apply without a restart.
+- add a line yourself with `crontab -e`:
+  ```
+  0 */6 * * * ~/.local/bin/releaseclone run >> ~/.local/share/releaseclone/log 2>&1
+  ```
+- or start `releaseclone watch` from your session autostart, or as a user service.
+  `watch` re-reads the config before each check, so edits apply without a restart.
 
 ## License
 
