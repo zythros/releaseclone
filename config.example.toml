@@ -1,0 +1,34 @@
+# releaseclone config — copy to ~/.config/releaseclone/config.toml
+
+dest = "~/Downloads/releases"   # files land in <dest>/<owner_repo>/<tag>/
+interval = "6h"                 # for `releaseclone watch` (s/m/h/d)
+notify = true                   # desktop notification via notify-send
+prereleases = false             # default for all repos
+keep = 3                        # keep this many releases per repo (0 = keep all)
+# post_command = "echo new $RC_REPO $RC_TAG in $RC_DIR"   # runs after each new release
+
+# Optional API tokens (raise GitHub's rate limit from 60 to 5000 req/h, allow private repos).
+# Env vars GITHUB_TOKEN / GITLAB_TOKEN / GITEA_TOKEN work too.
+# [tokens]
+# "github.com" = "ghp_..."
+
+[[repo]]
+url = "https://github.com/tangency-labs/solidcraft"
+# Releases have ~45 assets (~4 GB) — pick only what you want.
+# Test patterns with:  releaseclone.py list <url> -i 'pattern'
+include = ["solidcraft-*-linux-x86_64.AppImage", "SHA256SUMS.txt"]
+
+# More examples:
+# [[repo]]
+# url = "https://codeberg.org/owner/project"     # Gitea/Forgejo
+# include = ["*linux*amd64*.tar.gz"]
+# exclude = ["*.sig"]
+#
+# [[repo]]
+# url = "https://gitlab.com/group/project"       # GitLab
+# prereleases = true
+# keep = 1
+#
+# [[repo]]
+# url = "https://git.example.org/owner/repo"     # self-hosted: say which forge
+# provider = "forgejo"                           # github | gitlab | gitea | forgejo
