@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import email.utils
 import fnmatch
 import hashlib
 import json
@@ -411,12 +412,73 @@ def notify(title: str, body: str) -> None:
         subprocess.run(["notify-send", "-a", "releaseclone", title, body], check=False)
 
 
+class RateLimited(RuntimeError):
+    pass
+
+
+def hhmm(t: float) -> str:
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def rate_limit_reset(code: int, headers) -> float | None:
+    """If a response says we're (about to be) rate limited, return when we may ask again."""
+    retry = headers.get("Retry-After")
+    remaining = headers.get("X-RateLimit-Remaining") or headers.get("RateLimit-Remaining")
+    reset = headers.get("X-RateLimit-Reset") or headers.get("RateLimit-Reset")
+    # A 403 is only a rate limit if the headers say so; otherwise it's e.g. a permissions problem.
+    if not (code == 429 or (code in (200, 403) and remaining == "0") or (code == 403 and retry)):
+        return None
+    now = time.time()
+    if retry:
+        if retry.isdigit():
+            return now + int(retry)
+        with contextlib.suppress(TypeError, ValueError):
+            return email.utils.parsedate_to_datetime(retry).timestamp()
+    if reset and reset.isdigit():
+        n = int(reset)
+        return n if n > 1e9 else now + n  # epoch seconds (GitHub, GitLab) or a delay
+    return now + 60  # limited, but no hint as to how long: GitHub's advice is wait a minute
+
+
+def api_get(forge: Forge, headers: dict[str, str], limits: dict | None = None):
+    """GET the forge's releases list -> (data, etag), honouring and recording rate limits.
+
+    `limits` maps host -> reset time; hosts still limited aren't contacted at all.
+    A 304 Not Modified is raised as HTTPError for the caller to handle.
+    """
+    if limits is not None and limits.get(forge.host, 0) > time.time():
+        raise RateLimited(f"{forge.host} rate limit: not checking until {hhmm(limits[forge.host])}")
+    try:
+        with http_open(forge.api_url(), headers) as resp:
+            data = json.load(resp)
+            etag = resp.headers.get("ETag")
+            until = rate_limit_reset(resp.status, resp.headers)
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            raise
+        until = rate_limit_reset(e.code, e.headers)
+        if until:
+            if limits is not None:
+                limits[forge.host] = until
+            hint = " (set GITHUB_TOKEN for a higher limit)" if isinstance(forge, GitHub) and not forge.token else ""
+            raise RateLimited(f"{forge.host} rate limit hit; waiting until {hhmm(until)}{hint}") from None
+        detail = e.read(300).decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} from {forge.host}: {detail}") from None
+    if until and limits is not None:  # that was our last allowed request; don't attempt more
+        limits[forge.host] = until
+        log(f"{forge.host} rate limit used up; pausing checks until {hhmm(until)}")
+    return data, etag
+
+
 def check_repo(rc: RepoConfig, state: State, do_notify: bool) -> None:
     forge = make_forge(rc.url, rc.provider, rc.token)
     st = state.repo(rc.key)
     st["checked"] = time.time()
+    limits = state.data.setdefault("_hosts", {})  # host -> time its rate limit resets
+    for host in [h for h, until in limits.items() if until <= time.time()]:
+        del limits[host]
     try:
-        _check_repo(rc, forge, st, do_notify)
+        _check_repo(rc, forge, st, do_notify, limits)
         st["error"] = None
     except Exception as e:
         st["error"] = str(e)
@@ -426,20 +488,17 @@ def check_repo(rc: RepoConfig, state: State, do_notify: bool) -> None:
         prune(repo_dir(rc, forge), rc.keep, st)
 
 
-def _check_repo(rc: RepoConfig, forge: Forge, st: dict, do_notify: bool) -> None:
+def _check_repo(rc: RepoConfig, forge: Forge, st: dict, do_notify: bool, limits: dict) -> None:
     headers = forge.auth_headers()
     if st.get("etag"):
         headers["If-None-Match"] = st["etag"]
     try:
-        with http_open(forge.api_url(), headers) as resp:
-            data = json.load(resp)
-            etag = resp.headers.get("ETag")
+        data, etag = api_get(forge, headers, limits)
     except urllib.error.HTTPError as e:
         if e.code == 304:
             log(f"{rc.key}: no changes")
             return
-        detail = e.read(300).decode(errors="replace")
-        raise RuntimeError(f"HTTP {e.code} from {forge.host}: {detail}") from None
+        raise
 
     releases = [r for r in forge.parse(data) if rc.prereleases or not r.prerelease]
     releases.sort(key=lambda r: r.published)
@@ -531,8 +590,10 @@ def cmd_watch(args) -> None:
 
 def cmd_list(args) -> None:
     forge = make_forge(args.url, args.provider)
-    with http_open(forge.api_url(), forge.auth_headers()) as resp:
-        releases = forge.parse(json.load(resp))
+    try:
+        releases = forge.parse(api_get(forge, forge.auth_headers())[0])
+    except RuntimeError as e:
+        sys.exit(str(e))
     if not args.prereleases:
         releases = [r for r in releases if not r.prerelease]
     if not releases:
@@ -556,6 +617,8 @@ def cmd_status(args) -> None:
     if not state.data:
         print("nothing downloaded yet")
     for key, st in state.data.items():
+        if key.startswith("_"):  # internal bookkeeping, e.g. rate limits
+            continue
         print(key)
         for tag, info in sorted(st["downloaded"].items(), key=lambda kv: kv[1]["published"], reverse=True):
             print(f"  {tag:20} {info['at']}  {len(info['files'])} file(s)")

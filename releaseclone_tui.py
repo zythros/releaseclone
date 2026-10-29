@@ -856,8 +856,7 @@ class App:
         self.status_line("fetching latest release…")
         try:
             forge = core.make_forge(url, provider, token or self.token_for(url))
-            with core.http_open(forge.api_url(), forge.auth_headers()) as resp:
-                releases = forge.parse(json.load(resp))
+            releases = forge.parse(core.api_get(forge, forge.auth_headers())[0])
         except Exception as e:
             self.flash(f"couldn't fetch releases: {e}")
             return None

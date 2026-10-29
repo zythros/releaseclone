@@ -57,6 +57,9 @@ Files go to `<dest>/<owner_repo>/<tag>/`, and a `latest` symlink points at the n
 - On the first check of a repo, only its newest release is downloaded (no backfill).
 - Downloads are verified against GitHub's asset digests and any `SHA256SUMS`/`checksums` file.
 - A failed release is retried on the next check.
+- Rate limits are honoured. If a site says the limit is used up (`429`, or `Retry-After` /
+  `X-RateLimit-*` headers), that site isn't contacted again until its reset time. Unauthenticated
+  GitHub allows 60 requests/hour; set `GITHUB_TOKEN` to get 5000.
 - `.AppImage` files are made executable.
 - `keep = N` keeps the newest N releases and deletes older ones. Set it globally or per `[[repo]]`;
   0 keeps everything. It's applied on every check, so lowering it takes effect right away.
