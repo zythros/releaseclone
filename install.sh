@@ -68,16 +68,39 @@ else
     echo "Kept existing config $CONFIG_DIR/config.toml"
 fi
 
-# --- optional extras
-command -v notify-send >/dev/null 2>&1 || echo "note: notify-send not found; desktop notifications are disabled (install libnotify)."
-command -v xdg-open >/dev/null 2>&1 || echo "note: xdg-open not found; the TUI's 'open folder' will show the path instead (install xdg-utils)."
+# --- optional extras (only relevant with a desktop session; skip the noise on servers)
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    command -v notify-send >/dev/null 2>&1 || echo "note: notify-send not found; desktop notifications are disabled (install libnotify)."
+    command -v xdg-open >/dev/null 2>&1 || echo "note: xdg-open not found; the TUI's 'open folder' will show the path instead (install xdg-utils)."
+fi
 
+# --- PATH
+RUN=releaseclone
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
-    *) echo "note: $PREFIX/bin is not on your PATH. Add it:"
-       echo "        fish:     fish_add_path $PREFIX/bin"
-       echo "        bash/zsh: echo 'export PATH=\"$PREFIX/bin:\$PATH\"' >> ~/.profile" ;;
+    *)
+        RUN="$BIN"
+        # Many distros' ~/.profile already adds ~/.local/bin, but only if it existed at login.
+        if [ "$PREFIX" = "$HOME/.local" ]; then pattern='\.local/bin'; else pattern="$PREFIX/bin"; fi
+        profile=""
+        for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bashrc"; do
+            if grep -qs "$pattern" "$f"; then profile="$f"; break; fi
+        done
+        if [ -n "$profile" ]; then
+            echo "note: $PREFIX/bin isn't on PATH in this shell yet, but $profile already adds it."
+            echo "      Log out and back in, or run:  source $profile"
+        else
+            echo "note: $PREFIX/bin is not on your PATH. Add it:"
+            case "${SHELL:-}" in
+                */fish) echo "        fish_add_path $PREFIX/bin    (takes effect immediately)" ;;
+                */zsh)  echo "        echo 'export PATH=\"$PREFIX/bin:\$PATH\"' >> ~/.zprofile"
+                        echo "      then log out and back in." ;;
+                *)      echo "        echo 'export PATH=\"$PREFIX/bin:\$PATH\"' >> ~/.profile"
+                        echo "      then log out and back in." ;;
+            esac
+        fi
+        ;;
 esac
 
 echo
-echo "Next: run 'releaseclone tui', or schedule 'releaseclone run' with cron (see README)."
+echo "Next: run '$RUN tui', or schedule '$RUN run' with cron (see README)."
