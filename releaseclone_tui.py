@@ -7,6 +7,7 @@ state file that the worker publishes after each job. Config edits rewrite only t
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import curses
 import glob
@@ -254,17 +255,19 @@ class Field:
     value: object
     kind: str  # text | list | int | tri | bool | hours
     help: str = ""
+    default: str = ""  # what an unset value means, shown instead of a bare "(default)"
 
     def show(self) -> str:
         v = self.value
+        unset = f"(default: {self.default})" if self.default else "(default)"
         if self.kind == "tri":
-            return {None: "(default)", True: "yes", False: "no"}[v]
+            return {None: unset, True: "yes", False: "no"}[v]
         if self.kind == "bool":
             return "on" if v else "off"
         if self.kind == "hours" and v:
             return f"{v} hour{'s' if v != 1 else ''}"
         if v is None or v == "":
-            return "(default)"
+            return unset
         if self.kind == "list":
             return ", ".join(v) if v else "(none: nothing will be downloaded)"
         return str(v)
@@ -701,16 +704,20 @@ class App:
         fields = [
             Field("URL", "url", raw.get("url", ""), "text", "Repo URL, or owner/repo for GitHub"),
             Field("Include", "include", raw.get("include"), "list",
-                  "Comma-separated globs (default: all assets). Press p to pick from the latest release."),
-            Field("Exclude", "exclude", raw.get("exclude"), "list", "Comma-separated globs to skip"),
+                  "Comma-separated globs. Press p to pick from the latest release.", "all assets"),
+            Field("Exclude", "exclude", raw.get("exclude"), "list", "Comma-separated globs to skip", "none"),
+            Field("Destination", "dest", raw.get("dest"), "text",
+                  "Download folder for this repo (a subfolder per repo is created inside). "
+                  "Empty = the global folder from settings", gdest),
             Field("Keep", "keep", raw.get("keep"), "int",
-                  f"Releases to keep before pruning. Empty = global ({gkeep or 'all'}), 0 = keep all"),
-            Field("Prereleases", "prereleases", raw.get("prereleases"), "tri", "Also download pre-releases"),
+                  "Releases to keep before pruning. Empty = global setting, 0 = keep all", str(gkeep or "all")),
+            Field("Prereleases", "prereleases", raw.get("prereleases"), "tri", "Also download pre-releases",
+                  "yes" if self.cfg.get("prereleases") else "no"),
             Field("Provider", "provider", raw.get("provider"), "text",
-                  "github / gitlab / gitea / forgejo. Empty = detect from the host"),
-            Field("Destination", "dest", raw.get("dest"), "text", f"Download folder. Empty = global ({gdest})"),
+                  "github / gitlab / gitea / forgejo. Empty = detect from the host", "detect"),
             Field("Post command", "post_command", raw.get("post_command"), "text",
-                  "Shell command run after each new release ($RC_REPO, $RC_TAG, $RC_DIR)"),
+                  "Shell command run after each new release ($RC_REPO, $RC_TAG, $RC_DIR)",
+                  self.cfg.get("post_command") or "none"),
         ]
 
         def pick(fs):
@@ -722,9 +729,12 @@ class App:
             if picked:
                 fs[1].value, fs[2].value = picked[0], picked[1] or None
 
-        title = f"Edit {self.name(rc)}" if rc else "Add repo"
+        if rc:
+            title, save_hint, start = f"Edit {self.name(rc)}", "save", 0
+        else:  # adding: saving starts the first download, so make the folder hard to miss
+            title, save_hint, start = "Add repo · check the download folder, then press s", "save & download", 3
         while True:
-            vals = self.form(title, fields, {"p": pick}, "p pick files from latest release")
+            vals = self.form(title, fields, {"p": pick}, "p pick files", save_hint, start)
             if vals is None:
                 return
             if not vals["url"]:
@@ -742,19 +752,20 @@ class App:
 
         merged = {**raw, **vals}
         old_url = rc.url if rc else None
+        new_key = merged["url"].rstrip("/")
+        before = {new_key: self.repo_folder(rc)} if rc else {}
         try:
             self.cfgfile.save_repo(old_url, merged)
         except Exception as e:
             self.flash(f"couldn't save config: {e}")
             return
         self.reload_config(force=True)
-        new_key = merged["url"].rstrip("/")
         if rc and new_key != rc.key:
             def move(st, old=rc.key, new=new_key):
                 if old in st.data:
                     st.data[new] = st.data.pop(old)
             self.submit("rename state", move)
-        self.flash("saved")
+        self.flash("saved" + self.offer_move(before))
         new_rc = next((r for r in self.repos if r.key == new_key), None)
         if not new_rc:
             return
@@ -824,7 +835,8 @@ class App:
             self.flash(f"config error: {e}")
             return
         fields = [
-            Field("Download folder", "dest", raw.get("dest"), "text", "Where files go (default ~/Downloads/releases)"),
+            Field("Download folder", "dest", raw.get("dest"), "text",
+                  "Where files go; each repo gets a subfolder. Repos can override.", "~/Downloads/releases"),
             Field("Check every", "interval", self.interval_hours(raw.get("interval")), "hours",
                   f"Hours between checks: {', '.join(map(str, CRON_HOURS))}. "
                   "Used by the TUI, `watch` and cron"),
@@ -832,9 +844,9 @@ class App:
                   "Check via cron even when the TUI is closed" if Crontab.available()
                   else "Unavailable: the crontab command isn't installed"),
             Field("Keep releases", "keep", raw.get("keep"), "int",
-                  "Releases to keep per repo before pruning (0 or empty = keep all). Repos can override."),
-            Field("Notifications", "notify", raw.get("notify"), "tri", "Desktop notification for new releases"),
-            Field("Prereleases", "prereleases", raw.get("prereleases"), "tri", "Default for all repos"),
+                  "Releases to keep per repo before pruning (0 or empty = keep all). Repos can override.", "all"),
+            Field("Notifications", "notify", raw.get("notify"), "tri", "Desktop notification for new releases", "no"),
+            Field("Prereleases", "prereleases", raw.get("prereleases"), "tri", "Default for all repos", "no"),
             Field("Post command", "post_command", raw.get("post_command"), "text",
                   "Shell command run after each new release ($RC_REPO, $RC_TAG, $RC_DIR)"),
         ]
@@ -842,6 +854,7 @@ class App:
         vals = self.form("Settings", fields)
         if vals is None:
             return
+        before = {rc.key: self.repo_folder(rc) for rc in self.repos}
         hours, cron = vals.pop("interval"), vals.pop("cron")
         vals["interval"] = f"{hours}h"
         try:
@@ -859,7 +872,40 @@ class App:
                 msg += f"; cron checks every {hours}h" if cron else "; cron checks removed"
             except Exception as e:
                 msg = f"settings saved, but cron wasn't updated: {e}"
-        self.flash(msg)
+        self.flash(msg + self.offer_move(before))
+
+    def repo_folder(self, rc) -> Path | None:
+        f = self.forge(rc)
+        return core.repo_dir(rc, f) if f else None
+
+    def offer_move(self, before: dict) -> str:
+        """After a folder change, offer to move existing downloads; returns a note for the flash message.
+
+        `before` maps repo key -> its download folder prior to the change. Without the move, old
+        releases would be stranded where pruning (which only looks in the current folder) never finds them.
+        """
+        moves = []
+        for rc in self.repos:
+            old, new = before.get(rc.key), self.repo_folder(rc)
+            if old and new and old != new and old.is_dir() and any(old.iterdir()):
+                moves.append((old, new))
+        if not moves:
+            return ""
+        target = moves[0][1] if len(moves) == 1 else moves[0][1].parent
+        if not self.confirm(f"Move existing downloads ({len(moves)} repo folder(s)) to {target}?"):
+            return "; existing downloads left in the old folder"
+
+        def job(st):
+            for old, new in moves:
+                new.mkdir(parents=True, exist_ok=True)
+                for item in old.iterdir():
+                    if not (new / item.name).exists() and not (new / item.name).is_symlink():
+                        shutil.move(str(item), str(new / item.name))
+                with contextlib.suppress(OSError):
+                    old.rmdir()  # only if everything moved
+                core.log(f"moved downloads {old} -> {new}")
+        self.submit("move downloads", job)
+        return "; moving existing downloads"
 
     @staticmethod
     def interval_hours(interval) -> int:
@@ -885,8 +931,8 @@ class App:
 
     # ---- generic form
 
-    def form(self, title, fields, extra=None, extra_hint=""):
-        sel = 0
+    def form(self, title, fields, extra=None, extra_hint="", save_hint="save", start=0):
+        sel = start
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
@@ -898,7 +944,7 @@ class App:
                 self.put(y, 2, f.label.ljust(lw), attr | curses.A_BOLD)
                 self.put(y, 2 + lw, " " + f.show(), attr | (curses.A_DIM if f.value in (None, "") else 0))
             self.put(3 + len(fields), 2, fields[sel].help, curses.color_pair(CYAN))
-            self.footer(f"⏎ edit  {extra_hint + '  ' if extra_hint else ''}s save  esc cancel")
+            self.footer(f"⏎ edit  {extra_hint + '  ' if extra_hint else ''}s {save_hint}  esc cancel")
             self.scr.refresh()
             k = self.key()
             if k in ("\x1b", "q"):
