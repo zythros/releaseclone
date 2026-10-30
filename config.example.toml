@@ -12,11 +12,13 @@ keep = 3                        # keep this many releases per repo (0 = keep all
 # [tokens]
 # "github.com" = "ghp_..."
 
-[[repo]]
-url = "https://github.com/tangency-labs/solidcraft"
-# Releases have ~45 assets (~4 GB) — pick only what you want.
-# Test patterns with:  releaseclone.py list <url> -i 'pattern'
-include = ["solidcraft-*-linux-x86_64.AppImage", "SHA256SUMS.txt"]
+# Add one [[repo]] section per project, or press `a` in `releaseclone tui`.
+# Test patterns with:  releaseclone list <url> -i 'pattern'
+#
+# [[repo]]
+# url = "https://github.com/tangency-labs/solidcraft"
+# # Releases have ~45 assets (~4 GB), so pick only what you want.
+# include = ["solidcraft-*-linux-x86_64.AppImage", "SHA256SUMS.txt"]
 
 # More examples:
 # [[repo]]
